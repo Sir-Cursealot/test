@@ -1,0 +1,178 @@
+name: Deploy Docker Image
+
+run-name: Deploy ${{ inputs.version }} to ${{ inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+
+      version:
+        description: Version to deploy (for example 1.0.93)
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.version }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ------------------------------------------------------------
+      # Validate and normalize version
+      # ------------------------------------------------------------
+
+      - name: Validate version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: $VERSION"
+            echo "Expected format: 1.0.93"
+            exit 1
+          fi
+
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "Deploying:"
+          echo "  Environment: ${{ inputs.environment }}"
+          echo "  Version: v$VERSION"
+
+      # ------------------------------------------------------------
+      # Select Azure environment
+      # ------------------------------------------------------------
+
+      - name: Select Azure environment
+        id: azure
+        shell: bash
+        run: |
+          case "${{ inputs.environment }}" in
+
+            dev)
+              echo "client_id=${{ secrets.AZURE_CLIENT_ID_DEV }}" >> "$GITHUB_OUTPUT"
+              echo "subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }}" >> "$GITHUB_OUTPUT"
+              echo "acr_name=${{ vars.AZURE_CONTAINER_REGISTRY_NAME_DEV }}" >> "$GITHUB_OUTPUT"
+              ;;
+
+            test)
+              echo "client_id=${{ secrets.AZURE_CLIENT_ID_TEST }}" >> "$GITHUB_OUTPUT"
+              echo "subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID_TEST }}" >> "$GITHUB_OUTPUT"
+              echo "acr_name=${{ vars.AZURE_CONTAINER_REGISTRY_NAME_TEST }}" >> "$GITHUB_OUTPUT"
+              ;;
+
+            prod)
+              echo "client_id=${{ secrets.AZURE_CLIENT_ID_PROD }}" >> "$GITHUB_OUTPUT"
+              echo "subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID_PROD }}" >> "$GITHUB_OUTPUT"
+              echo "acr_name=${{ vars.AZURE_CONTAINER_REGISTRY_NAME_PROD }}" >> "$GITHUB_OUTPUT"
+              ;;
+
+            *)
+              echo "Unknown environment: ${{ inputs.environment }}"
+              exit 1
+              ;;
+          esac
+
+      # ------------------------------------------------------------
+      # Login to GHCR
+      # ------------------------------------------------------------
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ------------------------------------------------------------
+      # Pull released image from GHCR
+      # ------------------------------------------------------------
+
+      - name: Pull image from GHCR
+        shell: bash
+        run: |
+          docker pull \
+            ghcr.io/gls-denmark/gls-control-hub-frontend:${{ steps.version.outputs.tag }}
+
+      # ------------------------------------------------------------
+      # Login to Azure using OIDC
+      # ------------------------------------------------------------
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ steps.azure.outputs.client_id }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.azure.outputs.subscription_id }}
+
+      # ------------------------------------------------------------
+      # Login to Azure Container Registry
+      # ------------------------------------------------------------
+
+      - name: Login to Azure Container Registry
+        shell: bash
+        run: |
+          az acr login \
+            --name "${{ steps.azure.outputs.acr_name }}"
+
+      # ------------------------------------------------------------
+      # Tag image for selected Azure Container Registry
+      # ------------------------------------------------------------
+
+      - name: Tag image for Azure Container Registry
+        shell: bash
+        run: |
+          SOURCE_IMAGE="ghcr.io/gls-denmark/gls-control-hub-frontend:${{ steps.version.outputs.tag }}"
+
+          VERSION_IMAGE="${{ steps.azure.outputs.acr_name }}.azurecr.io/control-hub-frontend:${{ steps.version.outputs.tag }}"
+
+          LATEST_IMAGE="${{ steps.azure.outputs.acr_name }}.azurecr.io/control-hub-frontend:latest"
+
+          docker tag "$SOURCE_IMAGE" "$VERSION_IMAGE"
+          docker tag "$SOURCE_IMAGE" "$LATEST_IMAGE"
+
+      # ------------------------------------------------------------
+      # Push version and latest to Azure Container Registry
+      # ------------------------------------------------------------
+
+      - name: Push image to Azure Container Registry
+        shell: bash
+        run: |
+          docker push \
+            "${{ steps.azure.outputs.acr_name }}.azurecr.io/control-hub-frontend:${{ steps.version.outputs.tag }}"
+
+          docker push \
+            "${{ steps.azure.outputs.acr_name }}.azurecr.io/control-hub-frontend:latest"
+
+      # ------------------------------------------------------------
+      # Deployment summary
+      # ------------------------------------------------------------
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          {
+            echo "## Frontend Deployment"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Environment** | \`${{ inputs.environment }}\` |"
+            echo "| **Version** | \`${{ steps.version.outputs.tag }}\` |"
+            echo "| **ACR** | \`${{ steps.azure.outputs.acr_name }}\` |"
+            echo "| **Version image** | \`${{ steps.azure.outputs.acr_name }}.azurecr.io/control-hub-frontend:${{ steps.version.outputs.tag }}\` |"
+            echo "| **Latest image** | \`${{ steps.azure.outputs.acr_name }}.azurecr.io/control-hub-frontend:latest\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
