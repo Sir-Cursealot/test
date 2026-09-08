@@ -1,2 +1,12 @@
 deployment:
   workflow: deploy-docker-image.yml
+
+  environments:
+    dev:
+      releasePolicy: all
+
+    test:
+      releasePolicy: all
+
+    prod:
+      releasePolicy: stable
