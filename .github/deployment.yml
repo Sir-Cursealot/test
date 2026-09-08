@@ -1,0 +1,2 @@
+deployment:
+  workflow: deploy-docker-image.yml
